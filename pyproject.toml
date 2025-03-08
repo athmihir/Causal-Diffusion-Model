@@ -1,0 +1,15 @@
+[project]
+name = "causal-diffusion-model"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "diffusers>=0.32.2",
+    "gdown>=5.2.0",
+    "ipykernel>=6.29.5",
+    "matplotlib>=3.10.1",
+    "pandas>=2.2.3",
+    "torch>=2.6.0",
+    "torchvision>=0.21.0",
+]
