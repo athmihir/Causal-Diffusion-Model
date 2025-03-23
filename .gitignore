@@ -173,3 +173,5 @@ cython_debug/
 CelebAMask-HQ/
 
 *.pt
+
+sd-vae-ft-mse/
