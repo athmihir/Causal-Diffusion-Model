@@ -175,3 +175,4 @@ CelebAMask-HQ/
 *.pt
 
 sd-vae-ft-mse/
+sd-vae-ft-ema/
