@@ -176,3 +176,5 @@ CelebAMask-HQ/
 
 sd-vae-ft-mse/
 sd-vae-ft-ema/
+MNIST/
+BARMNIST/
