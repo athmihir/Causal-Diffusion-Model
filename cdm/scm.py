@@ -3,7 +3,7 @@ import torch
 import math
 from enum import Enum
 from collections import defaultdict
-from constants import IMAGE_CHANNELS, IMAGE_RESOLUTION
+from cdm.constants import IMAGE_CHANNELS, IMAGE_RESOLUTION
 
 class EdgeType(Enum):
     DIRECTED = 1
@@ -13,13 +13,21 @@ class Vertex():
     def __init__(self, label, dimensions):
         self.label = label
         self.dimensions = dimensions
-        self.deriving_function = None
 
     def __hash__(self):
         return hash((self.label))
     
     def __eq__(self, other):
-        return self.label == other.label and self.dimensions == other.dimensions and self.deriving_function == other.deriving_function
+        return self.label == other.label and self.dimensions == other.dimensions
+    
+    def __str__(self):
+        return f"Vertex(label:'{self.label}, dimensions: '{self.dimensions}'')"
+    
+    def is_unobserved(self):
+        if self.label.startswith("U_"):
+            return True
+        return False
+
 
 class Edge():
     def __init__(self, src_vertex:Vertex, dest_vertex:Vertex, edge_type=EdgeType):
@@ -30,7 +38,9 @@ class Edge():
 class SCM(nn.Module):
     def __init__(self, edges: list[Edge]):
         super().__init__()
-        # Holds the main DAG
+        # Holds the weights for each edge in the SCM
+        self.layers = nn.ModuleDict()
+        # Holds the main DAG adjacency list
         self.functional_map = defaultdict(list)
         # Holds the computed value tensors for the forward passes.
         self.value_map = {}
@@ -43,12 +53,13 @@ class SCM(nn.Module):
         '''Defines the NCM functional relationships between input and output vertex'''
         for vertex, input_list in self.functional_map.items():
             # ie. vertex does not represent exogenous U.
-            if vertex.deriving_function is not None:
+            if not vertex.is_unobserved():
                 # These are the total channels after combining all inputs to the node.
-                total_channels = 0
+                # We start with 3 because each endogenous V also gets the original image as a prior.
+                total_channels = 3
                 for element in input_list:
                     total_channels += element.dimensions[0]
-                vertex.deriving_function = SCMFunction((total_channels, IMAGE_RESOLUTION, IMAGE_RESOLUTION), output_classes=vertex.dimensions)
+                self.layers[str(vertex)] = SCMFunction((total_channels, IMAGE_RESOLUTION, IMAGE_RESOLUTION), output_classes=vertex.dimensions[-1])
 
     def construct_functional_map(self, edges: list[Edge]):
         '''Constructs the reverse adjacency list for the DAG.
@@ -60,31 +71,50 @@ class SCM(nn.Module):
             else:
                 # Create a vertex for unobserved confounding and add it to both the edges
                 uc_vertex = Vertex(f"U_{edge.dest_vertex.label}_{edge.src_vertex.label}", dimensions=(IMAGE_CHANNELS, IMAGE_RESOLUTION, IMAGE_RESOLUTION))
-                uc_vertex.deriving_function = lambda x: torch.randn(uc_vertex.dimensions)
                 self.functional_map[edge.dest_vertex].append(uc_vertex)
                 self.functional_map[edge.src_vertex].append(uc_vertex)
+        # Append unobserved confounding as dependency for those V that do not have an unobserved yet assigned to them.
+        for vertex, _ in self.functional_map.items():
+            if not vertex.is_unobserved() and not self.has_unobserved(vertex):
+                uc_vertex = Vertex(f"U_{vertex.label}", dimensions=(IMAGE_CHANNELS, IMAGE_RESOLUTION, IMAGE_RESOLUTION))
+                self.functional_map[vertex].append(uc_vertex)
 
-    def forward(self):
+    def forward(self, I):
         '''This computes all the vertices in the SCM.'''
         for vertex, _ in self.functional_map.items():
-            self.recursive_forward(vertex)
+            self.recursive_forward(vertex, I)
+        return self.value_map
            
-    def recursive_forward(self, vertex):
+    def recursive_forward(self, vertex, I):
         '''This computes the values of a single vertex'''
+        # Return vertex if found in the map
         if vertex in self.value_map:
-            # Return vertex if found in the map
             return self.value_map[vertex]
-        input_value_list = []
-        for input_vertex in self.functional_map[vertex]:
-            input_value_list.append(self.recursive_forward(input_vertex))
-        # Now concatenate the input tensors along the Channel dimension
-        self.value_map[vertex] = torch.cat(input_value_list, dim=1)
+        # If this is a exogenous vertex, we can simply set it as random
+        if vertex.label.startswith("U_"):
+            self.value_map[vertex] = torch.randn(tuple([I.shape[0]] + list(vertex.dimensions)), device=I.device)
+        else:
+            # Since the image will always be an input fed into the SCM... 
+            input_value_list = [I]
+            for input_vertex in self.functional_map.get(vertex):
+                input_value = self.recursive_forward(input_vertex, I)
+                # Broadcast the shape to ensure the correct dimensions for input are maintained
+                if len(input_value.shape) < 3:
+                    input_value = input_value.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, IMAGE_RESOLUTION, IMAGE_RESOLUTION)
+                input_value_list.append(input_value)
+            # Concatenate all the input tensors and pass it through the deriving function for the vertex
+            self.value_map[vertex] = self.layers[str(vertex)](torch.cat(input_value_list, dim=1))
         return self.value_map[vertex]
     
     def clear_intermediate_values(self):
         '''Clears all the values accrued during the forward pass'''
         self.value_map = {}
-            
+
+    def has_unobserved(self, vertex):
+        for c_v in self.functional_map.get(vertex):
+            if c_v.label.startswith("U_"):
+                return True
+        return False
             
 class SCMFunction(nn.Module):
     '''Represents the functional relationships for an SCM'''
@@ -92,22 +122,23 @@ class SCMFunction(nn.Module):
         super().__init__()
         C,H,W = input_dims
         CONV_KERNEL_SIZE = 3
+        CONV_PADDING = 1
         POOLING_KERNEL_SIZE = 2
         POOLING_STRIDE = 2
         CNN1_CHANNELS = 32
         CNN2_CHANNELS = 16
         CNN3_CHANNELS = 1
         # Calculate what the dimensions would look like for the final layer.
-        new_dims = self.calculate_conv_dims(input_dims, CNN1_CHANNELS, CONV_KERNEL_SIZE)
+        new_dims = self.calculate_conv_dims(input_dims, CNN1_CHANNELS, CONV_KERNEL_SIZE, padding=CONV_PADDING)
         new_dims = self.calculate_conv_dims(new_dims, new_dims[0], POOLING_KERNEL_SIZE, stride=POOLING_STRIDE)
-        new_dims = self.calculate_conv_dims(new_dims, CNN2_CHANNELS, CONV_KERNEL_SIZE)
+        new_dims = self.calculate_conv_dims(new_dims, CNN2_CHANNELS, CONV_KERNEL_SIZE, padding=CONV_PADDING)
         new_dims = self.calculate_conv_dims(new_dims, new_dims[0], POOLING_KERNEL_SIZE, stride=POOLING_STRIDE)
-        new_dims = self.calculate_conv_dims(new_dims, CNN3_CHANNELS, CONV_KERNEL_SIZE)
+        new_dims = self.calculate_conv_dims(new_dims, CNN3_CHANNELS, CONV_KERNEL_SIZE, padding=CONV_PADDING)
         linear_input_features = math.prod(new_dims)
         # instantiate the layers we need.
-        self.cnn1 = nn.Conv2d(in_channels=C, out_channels=CNN1_CHANNELS, kernel_size=CONV_KERNEL_SIZE)
-        self.cnn2 = nn.Conv2d(in_channels=CNN1_CHANNELS, out_channels=CNN2_CHANNELS, kernel_size=CONV_KERNEL_SIZE)
-        self.cnn3 = nn.Conv2d(in_channels=CNN2_CHANNELS, out_channels=CNN3_CHANNELS, kernel_size=CONV_KERNEL_SIZE)
+        self.cnn1 = nn.Conv2d(in_channels=C, out_channels=CNN1_CHANNELS, kernel_size=CONV_KERNEL_SIZE, padding=CONV_PADDING)
+        self.cnn2 = nn.Conv2d(in_channels=CNN1_CHANNELS, out_channels=CNN2_CHANNELS, kernel_size=CONV_KERNEL_SIZE, padding=CONV_PADDING)
+        self.cnn3 = nn.Conv2d(in_channels=CNN2_CHANNELS, out_channels=CNN3_CHANNELS, kernel_size=CONV_KERNEL_SIZE, padding=CONV_PADDING)
         self.linear = nn.Linear(linear_input_features, output_classes)
         self.pooling = nn.MaxPool2d(POOLING_KERNEL_SIZE, POOLING_STRIDE)
         self.relu = nn.ReLU()
@@ -117,7 +148,7 @@ class SCMFunction(nn.Module):
         new_c = out_channels
         new_h = (H - kernel_size + 2*padding) / stride + 1 
         new_w = (W - kernel_size + 2*padding) / stride + 1
-        return (new_c, new_h, new_w)
+        return (new_c, int(new_h), int(new_w))
     
     def forward(self, x, intervention=None):
         if intervention is not None:
