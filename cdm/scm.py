@@ -91,7 +91,7 @@ class SCM(nn.Module):
         if vertex in self.value_map:
             return self.value_map[vertex]
         # If we are asked to perform an intervention, then we just set it
-        if intervention_dict and vertex in intervention_dict:
+        if intervention_dict is not None and vertex in intervention_dict:
             self.value_map[vertex] = intervention_dict[vertex]
         # If this is a exogenous vertex, we can simply set it as random
         elif vertex.label.startswith("U_"):
@@ -100,7 +100,7 @@ class SCM(nn.Module):
             # Since the image will always be an input fed into the SCM... 
             input_value_list = [I]
             for input_vertex in self.functional_map.get(vertex):
-                input_value = self.recursive_forward(input_vertex, I)
+                input_value = self.recursive_forward(input_vertex, I, intervention_dict)
                 # Broadcast the shape to ensure the correct dimensions for input are maintained
                 if len(input_value.shape) < 3:
                     input_value = input_value.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, IMAGE_RESOLUTION, IMAGE_RESOLUTION)
