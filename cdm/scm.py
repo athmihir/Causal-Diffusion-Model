@@ -79,19 +79,22 @@ class SCM(nn.Module):
                 uc_vertex = Vertex(f"U_{vertex.label}", dimensions=(IMAGE_CHANNELS, IMAGE_RESOLUTION, IMAGE_RESOLUTION))
                 self.functional_map[vertex].append(uc_vertex)
 
-    def forward(self, I):
+    def forward(self, I, intervention_dict:dict[Vertex, torch.tensor]=None):
         '''This computes all the vertices in the SCM.'''
         for vertex, _ in self.functional_map.items():
-            self.recursive_forward(vertex, I)
+            self.recursive_forward(vertex, I, intervention_dict)
         return self.value_map
            
-    def recursive_forward(self, vertex, I):
+    def recursive_forward(self, vertex, I, intervention_dict=None):
         '''This computes the values of a single vertex'''
         # Return vertex if found in the map
         if vertex in self.value_map:
             return self.value_map[vertex]
+        # If we are asked to perform an intervention, then we just set it
+        if intervention_dict and vertex in intervention_dict:
+            self.value_map[vertex] = intervention_dict[vertex]
         # If this is a exogenous vertex, we can simply set it as random
-        if vertex.label.startswith("U_"):
+        elif vertex.label.startswith("U_"):
             self.value_map[vertex] = torch.randn(tuple([I.shape[0]] + list(vertex.dimensions)), device=I.device)
         else:
             # Since the image will always be an input fed into the SCM... 
@@ -109,6 +112,13 @@ class SCM(nn.Module):
     def clear_intermediate_values(self):
         '''Clears all the values accrued during the forward pass'''
         self.value_map = {}
+    
+    def clear_endogenous_values(self):
+        '''Clears only the endogenous values, but keeps the exogenous values. Useful during interventions and recomputing the SCM.'''
+        clear_list = list(filter(lambda v: not v.is_unobserved() , self.value_map))
+        for element in clear_list:
+            self.value_map.pop(element)
+
 
     def has_unobserved(self, vertex):
         for c_v in self.functional_map.get(vertex):

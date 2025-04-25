@@ -33,12 +33,16 @@ class CausalImageModel(nn.Module):
         )
 
 
-    def forward(self, I, noisy_x, timestep, vertex_order, reset_scm=True):
+    def forward(self, I, noisy_x, timestep, vertex_order, reset_scm=True, intervention_dict:dict[Vertex, torch.tensor]=None):
         if reset_scm:
             # Ensure no values are left cached in our SCM.
             self.scm.clear_intermediate_values()
             # Generate the factors from the SCM.
-            value_map = self.scm(I)
+            value_map = self.scm(I, intervention_dict)
+        elif intervention_dict is not None:
+            # When we want to perform intervention but keep same U.
+            self.scm.clear_endogenous_values()
+            value_map = self.scm(I, intervention_dict)
         else:
             value_map = self.scm.value_map
         # We concatenate the values in the given vertex order.
@@ -46,3 +50,5 @@ class CausalImageModel(nn.Module):
         conditional_labels = torch.cat(generative_factors, dim=-1).unsqueeze(-2)
         # Return the Unet prediction and the generative factors.
         return self.unet(noisy_x, timestep, conditional_labels).sample, generative_factors
+        
+        
