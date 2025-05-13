@@ -40,14 +40,19 @@ class SCM(nn.Module):
         super().__init__()
         # Holds the weights for each edge in the SCM
         self.layers = nn.ModuleDict()
+        # Holds the weights for the Autoencoder layers.
+        self.ae_layers = nn.ModuleDict()
         # Holds the main DAG adjacency list
         self.functional_map = defaultdict(list)
         # Holds the computed value tensors for the forward passes.
         self.value_map = {}
+        # Holds the output tensors for VertexAE 
+        self.value_map_2 = {}
         # construct the functional map 
         self.construct_functional_map(edges)
         # define the ncm functional components for each vertex in the functional map
         self.define_functional_components()
+        
     
     def define_functional_components(self):
         '''Defines the NCM functional relationships between input and output vertex'''
@@ -60,6 +65,7 @@ class SCM(nn.Module):
                 for element in input_list:
                     total_channels += element.dimensions[0]
                 self.layers[str(vertex)] = SCMFunction((total_channels, IMAGE_RESOLUTION, IMAGE_RESOLUTION), output_classes=vertex.dimensions[-1])
+                self.ae_layers[str(vertex)] = VertexAE(vertex.dimensions[-1], vertex.dimensions[-1])
 
     def construct_functional_map(self, edges: list[Edge]):
         '''Constructs the reverse adjacency list for the DAG.
@@ -83,7 +89,7 @@ class SCM(nn.Module):
         '''This computes all the vertices in the SCM.'''
         for vertex, _ in self.functional_map.items():
             self.recursive_forward(vertex, I, intervention_dict)
-        return self.value_map
+        return self.value_map, self.value_map_2
            
     def recursive_forward(self, vertex, I, intervention_dict=None):
         '''This computes the values of a single vertex'''
@@ -92,7 +98,8 @@ class SCM(nn.Module):
             return self.value_map[vertex]
         # If we are asked to perform an intervention, then we just set it
         if intervention_dict is not None and vertex in intervention_dict:
-            self.value_map[vertex] = intervention_dict[vertex]
+            self.value_map[vertex] = self.ae_layers[str(vertex)].decode(intervention_dict[vertex])
+            self.value_map_2[vertex] = (intervention_dict[vertex], self.value_map[vertex])
         # If this is a exogenous vertex, we can simply set it as random
         elif vertex.label.startswith("U_"):
             self.value_map[vertex] = torch.randn(tuple([I.shape[0]] + list(vertex.dimensions)), device=I.device)
@@ -107,17 +114,21 @@ class SCM(nn.Module):
                 input_value_list.append(input_value)
             # Concatenate all the input tensors and pass it through the deriving function for the vertex
             self.value_map[vertex] = self.layers[str(vertex)](torch.cat(input_value_list, dim=1))
+            # Also autoencode the vertex.
+            self.value_map_2[vertex] = self.ae_layers[str(vertex)](self.value_map[vertex])
         return self.value_map[vertex]
     
     def clear_intermediate_values(self):
         '''Clears all the values accrued during the forward pass'''
         self.value_map = {}
+        self.value_map_2 = {}
     
     def clear_endogenous_values(self):
         '''Clears only the endogenous values, but keeps the exogenous values. Useful during interventions and recomputing the SCM.'''
         clear_list = list(filter(lambda v: not v.is_unobserved() , self.value_map))
         for element in clear_list:
             self.value_map.pop(element)
+            self.value_map_2.pop(element)
 
 
     def has_unobserved(self, vertex):
@@ -125,7 +136,43 @@ class SCM(nn.Module):
             if c_v.label.startswith("U_"):
                 return True
         return False
-            
+
+class VertexAE(nn.Module):
+    '''This AE encodes high dimensional V into low dimensional class labels. 
+    It also decodes low dimensional class labels into high dimensional V.'''
+    def __init__(self, input_dims, output_classes):
+        super().__init__()
+        hidden_dims = 50
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dims, hidden_dims),
+            nn.SiLU(),  # Swish activation function
+            nn.Linear(hidden_dims, hidden_dims),
+            nn.SiLU(),  # Swish activation function
+            nn.Linear(hidden_dims, output_classes),
+            nn.Softmax(dim=1)
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(output_classes, hidden_dims ),
+            nn.SiLU(),  # Swish activation function
+            nn.Linear(hidden_dims, hidden_dims),
+            nn.SiLU(),  # Swish activation function
+            nn.Linear(hidden_dims, input_dims),
+            nn.SiLU(),  # Swish activation function
+        )
+        
+    def encode(self, x):
+        return self.encoder(x)
+    
+    def decode(self, z):
+        return self.decoder(z)
+
+    def forward(self, x):
+        '''Takes V(high_dim), returns V(low_dim), V(high_dim_reconstructed),'''
+        v_low = self.encode(x)
+        v_high_reconstructed = self.decode(v_low)
+        return (v_low, v_high_reconstructed)
+    
+
 class SCMFunction(nn.Module):
     '''Represents the functional relationships for an SCM'''
     def __init__(self, input_dims, output_classes):

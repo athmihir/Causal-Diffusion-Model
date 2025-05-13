@@ -38,17 +38,18 @@ class CausalImageModel(nn.Module):
             # Ensure no values are left cached in our SCM.
             self.scm.clear_intermediate_values()
             # Generate the factors from the SCM.
-            value_map = self.scm(I, intervention_dict)
+            value_map, value_map_2 = self.scm(I, intervention_dict)
         elif intervention_dict is not None:
             # When we want to perform intervention but keep same U.
             self.scm.clear_endogenous_values()
-            value_map = self.scm(I, intervention_dict)
+            value_map, value_map_2 = self.scm(I, intervention_dict)
         else:
-            value_map = self.scm.value_map
+            value_map, value_map_2 = self.scm.value_map, self.scm.value_map_2
         # We concatenate the values in the given vertex order.
         generative_factors = [value_map[v] for v in vertex_order]
+        ae_factors = [value_map_2[v] for v in vertex_order]
         conditional_labels = torch.cat(generative_factors, dim=-1).unsqueeze(-2)
         # Return the Unet prediction and the generative factors.
-        return self.unet(noisy_x, timestep, conditional_labels).sample, generative_factors
+        return self.unet(noisy_x, timestep, conditional_labels).sample, generative_factors, ae_factors
         
         
