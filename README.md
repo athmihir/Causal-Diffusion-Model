@@ -7,3 +7,5 @@ The Dataset was picked up from this [Repository](https://github.com/switchableno
 gdown https://drive.google.com/uc?id=1badu11NqxGf6qM3PTTooQDJvQbejgbTv
 ```
 
+View the detailed Project report [here](https://github.com/athmihir/Causal-Diffusion-Model/blob/main/CI2_Final_Report.pdf)
+
